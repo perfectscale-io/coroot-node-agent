@@ -108,6 +108,7 @@ type ConnectionStats struct {
 
 type Container struct {
 	id       ContainerID
+	appId    string
 	cgroup   *cgroup.Cgroup
 	metadata *ContainerMetadata
 
@@ -155,8 +156,15 @@ func NewContainer(id ContainerID, cg *cgroup.Cgroup, md *ContainerMetadata, pid 
 		return nil, err
 	}
 	defer netNs.Close()
+
+	cid := string(id)
+	appId := common.ContainerIdToOtelServiceName(cid)
+	if appId == cid {
+		appId = ""
+	}
 	c := &Container{
 		id:       id,
+		appId:    appId,
 		cgroup:   cg,
 		metadata: md,
 
@@ -348,15 +356,20 @@ func (c *Container) Collect(ch chan<- prometheus.Metric) {
 		if len(cmdline) == 0 {
 			continue
 		}
-		appType := guessApplicationType(cmdline)
-		if appType != "" {
+		if appType := guessApplicationTypeByCmdline(cmdline); appType != "" {
 			appTypes[appType] = struct{}{}
+		} else {
+			if exe, err := os.Readlink(proc.Path(pid, "exe")); err == nil {
+				if appType = guessApplicationTypeByExe(exe); appType != "" {
+					appTypes[appType] = struct{}{}
+				}
+			}
 		}
 		if process.isGolangApp {
 			appTypes["golang"] = struct{}{}
 		}
 		switch {
-		case isJvm(cmdline):
+		case proc.IsJvm(cmdline):
 			jvm, jMetrics := jvmMetrics(pid)
 			if len(jMetrics) > 0 && !seenJvms[jvm] {
 				seenJvms[jvm] = true
@@ -696,17 +709,21 @@ func (c *Container) onL7Request(pid uint32, fd uint64, timestamp uint64, r *l7.R
 	trace := c.tracer.NewTrace(conn.DestinationKey.ActualDestinationIfKnown())
 	switch r.Protocol {
 	case l7.ProtocolHTTP:
-		stats.observe(r.Status.Http(), "", r.Duration)
 		method, path := l7.ParseHttp(r.Payload)
-		trace.HttpRequest(method, path, r.Status, r.Duration)
+		if !common.HttpFilter.ShouldBeSkipped(path) {
+			stats.observe(r.Status.Http(), "", r.Duration)
+			trace.HttpRequest(method, path, r.Status, r.Duration)
+		}
 	case l7.ProtocolHTTP2:
 		if conn.http2Parser == nil {
 			conn.http2Parser = l7.NewHttp2Parser()
 		}
 		requests := conn.http2Parser.Parse(r.Method, r.Payload, uint64(r.Duration))
 		for _, req := range requests {
-			stats.observe(req.Status.Http(), "", req.Duration)
-			trace.Http2Request(req.Method, req.Path, req.Scheme, req.Status, req.Duration)
+			if !common.HttpFilter.ShouldBeSkipped(req.Path) {
+				stats.observe(req.Status.Http(), "", req.Duration)
+				trace.Http2Request(req.Method, req.Path, req.Scheme, req.Status, req.Duration)
+			}
 		}
 	case l7.ProtocolPostgres:
 		if r.Method != l7.MethodStatementClose {
