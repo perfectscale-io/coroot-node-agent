@@ -28,6 +28,19 @@ func GetCmdline(pid uint32) []byte {
 	return bytes.TrimSuffix(cmdline, []byte{0})
 }
 
+func GetEnvVars(pid uint32) []byte {
+	envvars, err := os.ReadFile(Path(pid, "environ"))
+	if err != nil {
+		return nil
+	}
+	// The environment variables are separated by null bytes, so we need to split them
+	// and join them with newlines for better readability.
+	envvars = bytes.ReplaceAll(envvars, []byte{0}, []byte{'\n'})
+	envvars = bytes.TrimSuffix(envvars, []byte{'\n'})
+
+	return envvars
+}
+
 func GetNsPid(pid uint32) uint32 {
 	data, err := os.ReadFile(Path(pid, "status"))
 	if err != nil {

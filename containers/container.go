@@ -231,15 +231,17 @@ func (c *Container) Collect(ch chan<- prometheus.Metric) {
 			return pids[i] < pids[j]
 		})
 
+		envVars := ""
 		cmdln := ""
 		if c.processes != nil && len(pids) > 0 {
 			if procc, ok := c.processes[pids[0]]; ok {
 				cmdln = string(proc.GetCmdline(procc.Pid))
 				cmdln = string(bytes.ReplaceAll([]byte(cmdln), []byte{0}, []byte(" ")))
+				envVars = string(proc.GetEnvVars(procc.Pid))
 			}
 		}
 
-		ch <- gauge(metrics.ContainerInfo, 1, c.metadata.image, c.metadata.systemdTriggeredBy, cmdln)
+		ch <- gauge(metrics.ContainerInfo, 1, c.metadata.image, c.metadata.systemdTriggeredBy, cmdln, envVars)
 	}
 	ch <- counter(metrics.Restarts, float64(c.restarts))
 
