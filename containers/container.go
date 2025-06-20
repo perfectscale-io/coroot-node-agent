@@ -2,6 +2,7 @@ package containers
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"sort"
 	"strings"
@@ -227,28 +228,67 @@ func (c *Container) Describe(ch chan<- *prometheus.Desc) {
 	ch <- prometheus.NewDesc("container", "", nil, nil)
 }
 
+// should get the envVar VARS_TO_COLLECT, and parse it to get the variable names
+func GetVarNamesForCollection() []string {
+	varsToCollect := os.Getenv("VARS_TO_COLLECT")
+	if varsToCollect == "" {
+		return nil
+	}
+	varNames := strings.Split(varsToCollect, ",")
+	for i, v := range varNames {
+		varNames[i] = strings.TrimSpace(v)
+	}
+	return varNames
+}
+func collectChosenEnvVars(envVarsToCollect []string, pid uint32) []string {
+	filteredEnvVars := []string{}
+	if len(envVarsToCollect) != 0 {
+		envVars := string(proc.GetEnvVars(pid))
+		// filter envVars to only include the variables we want to collect
+		envVarsLines := strings.Split(envVars, "\n")
+		for _, line := range envVarsLines {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			// check if the line starts with any of the variable names we want to collect
+			for _, varName := range envVarsToCollect {
+				if strings.HasPrefix(line, varName+"=") {
+					filteredEnvVars = append(filteredEnvVars, line)
+					break
+				}
+			}
+		}
+	}
+	return filteredEnvVars
+}
+
 func (c *Container) Collect(ch chan<- prometheus.Metric) {
 	c.registry.updateTrafficStatsIfNecessary()
 
 	c.lock.RLock()
 	defer c.lock.RUnlock()
+	envVarsToCollect := GetVarNamesForCollection()
 
 	if c.metadata.image != "" || c.metadata.systemdTriggeredBy != "" {
 		pids := maps.Keys(c.processes)
 		sort.Slice(pids, func(i, j int) bool {
 			return pids[i] < pids[j]
 		})
-
+		mainPid := pids[0]
 		envVars := ""
 		cmdln := ""
+
 		if c.processes != nil && len(pids) > 0 {
-			if procc, ok := c.processes[pids[0]]; ok {
+			if procc, ok := c.processes[mainPid]; ok {
 				cmdln = string(proc.GetCmdline(procc.Pid))
 				cmdln = string(bytes.ReplaceAll([]byte(cmdln), []byte{0}, []byte(" ")))
-				envVars = string(proc.GetEnvVars(procc.Pid))
+				filteredEnvVars := collectChosenEnvVars(envVarsToCollect, procc.Pid)
+				envVars = strings.Join(filteredEnvVars, "\n")
 			}
 		}
 
+		fmt.Println("pid=", pids, " cmdln=", cmdln, " env=", envVars)
 		ch <- gauge(metrics.ContainerInfo, 1, c.metadata.image, c.metadata.systemdTriggeredBy, cmdln, envVars)
 	}
 	ch <- counter(metrics.Restarts, float64(c.restarts))
